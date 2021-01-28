@@ -1,4 +1,7 @@
 ﻿using System;
+using System.Net.Sockets;
+using YAILSharp;
+using YAILSharp.Network;
 
 namespace YAILSharpDemo
 {
@@ -6,7 +9,12 @@ namespace YAILSharpDemo
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Hello World!");
+            new YailSharpDemo(null).Go();
+
+        }
+
+        static void MainLoop()
+        {
         }
     }
 }
