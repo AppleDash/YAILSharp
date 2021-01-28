@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 
@@ -12,6 +14,7 @@ namespace YAILSharp.Network
         private readonly ServerConfiguration _serverConfiguration;
         private LineBuffer _lineBuffer = new LineBuffer();
         private byte[] _recvBuffer = new byte[4096];
+        private Stream _stream;
 
         public IRCConnection(ServerConfiguration serverConfiguration)
         {
@@ -22,31 +25,30 @@ namespace YAILSharp.Network
 
         public void Connect()
         {
-            var hostEntry = Dns.GetHostEntry(this._serverConfiguration.Host);
-            var selectedAddress = hostEntry.AddressList[0]; // Slightly unintelligent, but hey.
-            
+            var selectedAddress = this.ResolveHost(this._serverConfiguration.Host, this._serverConfiguration.V6Mode);
             this.Socket = new Socket(selectedAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             this.Socket.Connect(selectedAddress, this._serverConfiguration.Port);
-            
-            // Alright, let's hope we're connected now, time to send the initial auth handshake...
-            this.WriteLine($"NICK {_serverConfiguration.Nickname}");
-            this.WriteLine($"USER {_serverConfiguration.Username} * * {_serverConfiguration.Realname}");
+            this._stream = new NetworkStream(this.Socket);
+
+            if (this._serverConfiguration.UseTLS)
+            {
+                var sslStream = new SslStream(this._stream);
+                sslStream.AuthenticateAsClient(this._serverConfiguration.Host);
+
+                this._stream = sslStream;
+            }
         }
 
         public List<Line> HandleReceive()
         {
             var receivedLines = new List<Line>();
-            var nBytesReceived = this.Socket.Receive(_recvBuffer);
+            var nBytesReceived = this._stream.Read(_recvBuffer);
+            
             _lineBuffer.Append(_recvBuffer, nBytesReceived);
 
             while (_lineBuffer.HasLine())
             {
-                var line = LineParser.Parse(_lineBuffer.PopLine());
-
-                if (!this.HandleLine(line)) // returns true if we should eat it, false otherwise.
-                {
-                    receivedLines.Add(line);
-                }
+                receivedLines.Add(Line.Parse(_lineBuffer.PopLine()));
             }
 
             return receivedLines;
@@ -54,32 +56,47 @@ namespace YAILSharp.Network
 
         public void WriteLine(string line)
         {
-            var bytes = Encoding.UTF8.GetBytes(line + "\r\n");
-            var bytesSent = 0;
-
-            // send in a loop to ensure that we send everything even if the first send is a partial one.
-            while (bytesSent < bytes.Length)
-            {
-                var bytesSentThisTime = this.Socket.Send(bytes, bytesSent, bytes.Length - bytesSent, SocketFlags.None);
-                
-                bytesSent += bytesSentThisTime;
-            }
-            
-            Console.WriteLine("<<< " + line);
+            this._stream.Write(Encoding.UTF8.GetBytes(line + "\r\n"));
         }
 
-        private bool HandleLine(Line line)
+        private IPAddress ResolveHost(string host, IPv6Mode v6Mode)
         {
-            Console.WriteLine(">>> " + line);
+            var hostEntry = Dns.GetHostEntry(host);
 
-            if (line.Command == "PING")
+            IPAddress v4Candidate = null;
+            IPAddress v6Candidate = null;
+
+            foreach (var addressCandidate in hostEntry.AddressList)
             {
-                this.WriteLine($"PONG :{line.Params[0]}");
+                var addressFamily = addressCandidate.AddressFamily;
                 
-                return true;
+                if (addressFamily == AddressFamily.InterNetwork)
+                {
+                    v4Candidate = addressCandidate;
+                }
+                else
+                {
+                    v6Candidate = addressCandidate;
+                }
+
+                // We found both a candidate V4 and V6 address to try.
+                if (v4Candidate != null && v6Candidate != null)
+                {
+                    break;
+                }
             }
 
-            return false;
+            switch (v6Mode)
+            {
+                case IPv6Mode.Require:
+                    return v6Candidate;
+                case IPv6Mode.Deny:
+                    return v4Candidate;
+                case IPv6Mode.Allow:
+                    return v6Candidate ?? v4Candidate;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(v6Mode), v6Mode, null);
+            }
         }
     }
 }
